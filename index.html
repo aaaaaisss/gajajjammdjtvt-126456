@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>津山の天気</title>
+<style>
+  :root{
+    --bg:#0c1117;
+    --panel:#131a23;
+    --line:#1f2733;
+    --label:#6b7b8d;
+    --text:#eef1f5;
+    --accent:#3b8fe0;
+  }
+  *{box-sizing:border-box;}
+  body{
+    background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;
+    margin:0;padding:16px;
+    font-variant-numeric:tabular-nums;
+  }
+  #app{max-width:420px;margin:0 auto;}
+
+  .updated{
+    text-align:center;font-size:0.72rem;color:var(--label);
+    letter-spacing:0.02em;margin-bottom:14px;
+    display:flex;align-items:center;justify-content:center;gap:6px;
+  }
+  .updated .dot{width:6px;height:6px;border-radius:50%;background:#3ddc84;display:inline-block;}
+  .updated.stale .dot{background:#e0a83b;}
+
+  .now{
+    text-align:center;padding:18px 0 24px;
+    background:var(--panel);border-radius:16px;margin-bottom:18px;
+  }
+  .now .place{color:var(--label);font-size:0.85rem;margin-bottom:6px;}
+  .now .main{display:flex;align-items:center;justify-content:center;gap:10px;}
+  .now .temp{font-size:3.6rem;font-weight:700;line-height:1;}
+  .now .rain-now{margin-top:14px;font-size:0.85rem;color:var(--label);}
+
+  .section-label{
+    margin:22px 0 8px;font-weight:700;color:var(--label);
+    font-size:0.78rem;letter-spacing:0.04em;
+    border-left:3px solid var(--accent);padding-left:8px;
+  }
+
+  .list{background:var(--panel);border-radius:12px;overflow:hidden;}
+  .row{
+    display:grid;
+    grid-template-columns:46px 30px 1fr 84px;
+    align-items:center;column-gap:10px;
+    padding:10px 14px;border-bottom:1px solid var(--line);
+    font-size:0.95rem;
+  }
+  .row:last-child{border-bottom:none;}
+  .row.now-hour{background:rgba(59,143,224,0.08);}
+  .row .time{color:var(--label);font-size:0.85rem;}
+  .row .icon{display:flex;align-items:center;justify-content:center;}
+  .row .temp{font-weight:700;text-align:right;padding-right:6px;}
+
+  .daily-row{
+    display:grid;
+    grid-template-columns:50px 30px 1fr 90px;
+    align-items:center;column-gap:10px;
+    padding:12px 14px;border-bottom:1px solid var(--line);
+    font-size:0.95rem;
+  }
+  .daily-row:last-child{border-bottom:none;}
+  .daily-row .date{color:var(--label);font-size:0.85rem;}
+  .daily-row .icon{display:flex;align-items:center;justify-content:center;}
+  .daily-row .temps{text-align:right;font-weight:700;padding-right:6px;}
+  .daily-row .temps .lo{color:var(--label);font-weight:400;font-size:0.85rem;}
+
+  /* 降水バー: トラックを常に表示し、テキストはバーの外側に配置 */
+  .rain{display:flex;align-items:center;gap:6px;justify-content:flex-end;}
+  .rain-track{
+    width:34px;height:7px;border-radius:4px;background:rgba(255,255,255,0.07);
+    position:relative;overflow:hidden;flex-shrink:0;
+  }
+  .rain-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;}
+  .rain-text{width:42px;text-align:right;font-size:0.82rem;font-variant-numeric:tabular-nums;}
+
+  .error{color:#ff6b6b;padding:24px;text-align:center;font-size:0.9rem;}
+  .skeleton{background:var(--panel);border-radius:12px;height:60px;margin-bottom:8px;
+    animation:pulse 1.4s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:0.5;}50%{opacity:0.9;}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="skeleton" style="height:160px;"></div>
+  <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+</div>
+
+<script>
+const LAT = 35.0667, LON = 134.0042;
+const CACHE_KEY = 'tsuyama_weather_v1';
+const TTL_MS = 10 * 60 * 1000; // 10分でキャッシュ失効
+
+function getSvg(c) {
+  const sun = '<circle cx="12" cy="12" r="5" fill="#ffca28"/><path d="M12 3v2m0 14v2m9-9h-2M5 12H3m13.4 6.4-1.4-1.4M6 6 4.6 4.6m13.4 0-1.4 1.4M6 18l-1.4 1.4" stroke="#ffca28" stroke-width="2" stroke-linecap="round"/>';
+  const cloud = '<path d="M17 18a4 4 0 000-8c-.2 0-.3 0-.5.1A6 6 0 005 11.5 4 4 0 005 19h12z" fill="#a0aab5"/>';
+  const rain = cloud + '<path d="M10 19l-1 3m5-3l-1 3" stroke="#4fc3f7" stroke-width="2" stroke-linecap="round"/>';
+  const snow = cloud + '<path d="M12 18v4m-2-2h4m-7-1l3 3m-3 0l3-3m7-1l-3 3m3 0l-3-3" stroke="#e3f2fd" stroke-width="1.5" stroke-linecap="round"/>';
+  const thunder = cloud + '<path d="M13 14l-4 4h3l-2 5 6-6h-3l2-3z" fill="#ffca28"/>';
+
+  let inner = cloud;
+  if(c<=1) inner = sun;
+  else if(c==2) inner = sun + '<path d="M18 16a3 3 0 000-6 4.5 4.5 0 00-8.5-1 3 3 0 000 6h8z" fill="#a0aab5" opacity="0.9"/>';
+  else if(c<=3 || c==45 || c==48) inner = cloud;
+  else if(c<=67 || (c>=80 && c<=82)) inner = rain;
+  else if(c<=77 || c==85 || c==86) inner = snow;
+  else if(c>=95) inner = thunder;
+  return `<svg viewBox="0 0 24 24" width="24" height="24" style="display:block">${inner}</svg>`;
+}
+
+// 気温の色: 離散的な8段階ではなく、寒色→暖色へ連続的に滑らかに補間する
+// -10℃(青紫)〜40℃(赤)をHSLの色相で連続マッピング → 境界の不自然な飛びをなくす
+function tempColor(t) {
+  const clamped = Math.max(-10, Math.min(40, t));
+  const ratio = (clamped + 10) / 50; // 0(寒)〜1(暑)
+  const hue = 255 - ratio * 255;     // 255(青紫) → 0(赤)
+  const sat = 75;
+  const light = 55;
+  return `hsl(${hue.toFixed(0)}, ${sat}%, ${light}%)`;
+}
+
+function tempHtml(t, size) {
+  const fs = size || '1rem';
+  return `<span style="color:${tempColor(t)};font-size:${fs};">${Math.round(t)}°</span>`;
+}
+
+// 降水: トラック(背景バー)を常時表示し、塗りつぶし幅で量を示す。テキストはバー外。
+function rainHtml(r) {
+  r = r || 0;
+  const w = Math.min((r / 10) * 100, 100); // 10mmを満タンとする
+  const intensity = r >= 5 ? '#5fb3ff' : r >= 1 ? '#3b8fe0' : '#2c5d85';
+  const textColor = r > 0 ? '#a9c6e6' : 'var(--label)';
+  return `<div class="rain">
+    <div class="rain-track"><div class="rain-fill" style="width:${w}%;background:${intensity};"></div></div>
+    <div class="rain-text" style="color:${textColor};">${r.toFixed(1)}mm</div>
+  </div>`;
+}
+
+function fmtUpdated(ts) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function render(d, fetchedAt, isStale) {
+  const c = d.current, h = d.hourly, dy = d.daily;
+
+  let html = `<div class="updated ${isStale ? 'stale' : ''}">
+    <span class="dot"></span>最終更新 ${fmtUpdated(fetchedAt)}${isStale ? '(更新中…)' : ''}
+  </div>`;
+
+  html += `<div class="now">
+    <div class="place">津山市の現在の天気</div>
+    <div class="main">
+      <div style="transform:scale(1.8);">${getSvg(c.weather_code)}</div>
+      <div style="margin-left:14px;">${tempHtml(c.temperature_2m, '3.6rem')}</div>
+    </div>
+    ${c.precipitation > 0 ? `<div class="rain-now">${rainHtml(c.precipitation)}</div>` : ''}
+  </div>`;
+
+  html += `<div class="section-label">12時間予報</div><div class="list">`;
+  let n = h.time.findIndex(t => t >= c.time);
+  if (n < 0) n = 0;
+  for (let j = n + 1; j < Math.min(n + 13, h.time.length); j++) {
+    const dt = new Date(h.time[j]);
+    const isNow = j === n + 1;
+    html += `<div class="row ${isNow ? 'now-hour' : ''}">
+      <span class="time">${dt.getHours()}時</span>
+      <span class="icon">${getSvg(h.weather_code[j])}</span>
+      <span class="temp">${tempHtml(h.temperature_2m[j])}</span>
+      ${rainHtml(h.precipitation[j])}
+    </div>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="section-label">明日・明後日</div><div class="list">`;
+  for (let j = 1; j < dy.time.length; j++) {
+    const dt = new Date(dy.time[j]);
+    html += `<div class="daily-row">
+      <span class="date">${dt.getMonth() + 1}/${dt.getDate()}</span>
+      <span class="icon">${getSvg(dy.weather_code[j])}</span>
+      <span class="temps">${tempHtml(dy.temperature_2m_max[j])} <span class="lo">/ ${Math.round(dy.temperature_2m_min[j])}°</span></span>
+      ${rainHtml(dy.precipitation_sum[j])}
+    </div>`;
+  }
+  html += `</div>`;
+
+  document.getElementById('app').innerHTML = html;
+}
+
+async function fetchFresh() {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,weather_code,precipitation&hourly=temperature_2m,weather_code,precipitation&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Asia/Tokyo&forecast_days=3`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('通信エラー');
+  const data = await res.json();
+  const payload = { data, fetchedAt: Date.now() };
+  localStorage.setItem(CACHE_KEY, JSON.stringify(payload));
+  return payload;
+}
+
+async function load() {
+  let cached = null;
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (raw) cached = JSON.parse(raw);
+  } catch (e) { /* キャッシュ破損は無視して再取得 */ }
+
+  const now = Date.now();
+
+  if (cached && (now - cached.fetchedAt) < TTL_MS) {
+    // 10分以内ならキャッシュのみで描画、通信なし
+    render(cached.data, cached.fetchedAt, false);
+    return;
+  }
+
+  if (cached) {
+    // 古いキャッシュは即表示しつつ裏で更新(stale-while-revalidate)
+    render(cached.data, cached.fetchedAt, true);
+  }
+
+  try {
+    const fresh = await fetchFresh();
+    render(fresh.data, fresh.fetchedAt, false);
+  } catch (e) {
+    if (!cached) {
+      document.getElementById('app').innerHTML = `<div class="error">取得エラー: ${e.message}</div>`;
+    }
+    // キャッシュ表示中にfetch失敗した場合は、古い表示のまま静かに諦める
+  }
+}
+
+load();
+</script>
+</body>
+</html>
+
